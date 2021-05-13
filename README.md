@@ -200,19 +200,19 @@ python -m torch.distributed.launch --nproc_per_node=8 eval_linear.py --data_path
 ```
 
 ## Evaluation: DAVIS 2017 Video object segmentation
-**Step 1 Prepare DAVIS 2017 data**  
+**Step 1: Prepare DAVIS 2017 data**  
 ```
 cd $HOME
 git clone https://github.com/davisvideochallenge/davis-2017 && cd davis-2017
 ./data/get_davis.sh
 ```
 
-**Step 2 Tracking**  
+**Step 2: Video object segmentation**  
 ```
-python eval_tracking_davis.py --data_path $HOME/davis-2017/DAVIS/ --output_dir /path/to/saving_dir
+python eval_video_segmentation.py --data_path $HOME/davis-2017/DAVIS/ --output_dir /path/to/saving_dir
 ```
 
-**Step 3 Evaluate the obtained tracking masked**  
+**Step 3: Evaluate the obtained segmentation**  
 ```
 git clone https://github.com/davisvideochallenge/davis2017-evaluation $HOME/davis2017-evaluation
 python $HOME/davis2017-evaluation/evaluation_method.py --task semi-supervised --results_path /path/to/saving_dir --davis_path $HOME/davis-2017/DAVIS/

@@ -23,6 +23,7 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 
+import cv2
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -44,14 +45,14 @@ def eval_video_tracking_davis(args, model, frame_list, video_dir, first_seg, seg
     que = queue.Queue(args.n_last_frames)
 
     # first frame
-    frame1 = read_frame(frame_list[0], args.input_size, args.patch_size)
+    frame1, ori_h, ori_w = read_frame(frame_list[0])
 
     # saving first segmentation
     out_path = os.path.join(video_folder, "00000.png")
     imwrite_indexed(out_path, seg_ori, color_palette)
     mask_neighborhood = None
     for cnt in tqdm(range(1, len(frame_list))):
-        frame_tar = read_frame(frame_list[cnt], args.input_size, args.patch_size)
+        frame_tar = read_frame(frame_list[cnt])[0]
 
         # we use the first segmentation and the n previous ones
         used_frames = [frame1] + [pair[0] for pair in list(que.queue)]
@@ -73,6 +74,7 @@ def eval_video_tracking_davis(args, model, frame_list, video_dir, first_seg, seg
 
         # saving to disk
         frame_tar_seg = np.array(frame_tar_seg.squeeze().cpu(), dtype=np.uint8)
+        frame_tar_seg = np.array(Image.fromarray(frame_tar_seg).resize((ori_w, ori_h), 0))
         frame_nm = frame_list[cnt].split('/')[-1].replace(".jpg", ".png")
         imwrite_indexed(os.path.join(video_folder, frame_nm), frame_tar_seg, color_palette)
 
@@ -142,7 +144,7 @@ def label_propagation(args, model, frame_tar, list_frames, list_segs, mask_neigh
 
     if args.size_mask_neighborhood > 0:
         if mask_neighborhood is None:
-            mask_neighborhood = restrict_neighborhood(h, w)
+            mask_neighborhood = restrict_neighborhood(w, h)
             mask_neighborhood = mask_neighborhood.unsqueeze(0).repeat(ncontext, 1, 1)
         aff *= mask_neighborhood
 
@@ -193,38 +195,59 @@ def read_frame_list(video_dir):
     return frame_list
 
 
-def read_seg(seg_path, size, downsampling_ratio):
-    seg = Image.open(seg_path)
-    w, h = seg.size
-    if len(size) == 1:
-        if h > w:
-            tw, th = size[0], (size[0] * h) / w
+def read_frame(frame_dir, scale_size=[480]):
+    """
+    read a single frame & preprocess
+    """
+    img = cv2.imread(frame_dir)
+    ori_h, ori_w, _ = img.shape
+    if len(scale_size) == 1:
+        if(ori_h > ori_w):
+            tw = scale_size[0]
+            th = (tw * ori_h) / ori_w
+            th = int((th // 64) * 64)
         else:
-            th, tw = size[0], (size[0] * w) / h
+            th = scale_size[0]
+            tw = (th * ori_w) / ori_h
+            tw = int((tw // 64) * 64)
     else:
-        tw, th = size
-    seg = torch.tensor(np.asarray(seg).copy())
-    seg = nn.functional.interpolate(seg[None, None], scale_factor=(tw/w, th/h), mode="nearest")[0]
-    tw, th = int(tw - tw % args.patch_size), int(th - th % args.patch_size)
-    seg = seg[:, :th, :tw]
-    small_seg = nn.functional.interpolate(seg[None], scale_factor=1/downsampling_ratio, mode="nearest")[0]
-    return to_one_hot(small_seg), seg.squeeze().numpy()
+        th, tw = scale_size
+    img = cv2.resize(img, (tw, th))
+    img = img.astype(np.float32)
+    img = img / 255.0
+    img = img[:, :, ::-1]
+    img = np.transpose(img.copy(), (2, 0, 1))
+    img = torch.from_numpy(img).float()
+    img = color_normalize(img)
+    return img, ori_h, ori_w
 
 
-def read_frame(frame_path, size, downsampling_ratio):
-    with open(frame_path, 'rb') as f:
-        img = Image.open(f)
-        img = img.convert('RGB')
-    transform = transforms.Compose([
-        transforms.Resize(size),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ])
-    img = transform(img)
-    # make the image divisible by the patch size
-    w, h = img.shape[1] - img.shape[1] % downsampling_ratio, img.shape[2] - img.shape[2] % downsampling_ratio
-    img = img[:, :w, :h]
-    return img
+def read_seg(seg_dir, factor, scale_size=[480]):
+    seg = Image.open(seg_dir)
+    h, w = seg.size
+    if len(scale_size) == 1:
+        if(h > w):
+            tw = scale_size[0]
+            th = (tw * h) / w
+            th = int((th // 64) * 64)
+        else:
+            th = scale_size[0]
+            tw = (th * w) / h
+            tw = int((tw // 64) * 64)
+    else:
+        tw = scale_size[1]
+        th = scale_size[0]
+    seg = np.asarray(seg).reshape((w, h))
+    small_seg = np.array(Image.fromarray(seg).resize((th // factor, tw // factor), 0))
+    small_seg = torch.from_numpy(small_seg.copy()).contiguous().float().unsqueeze(0)
+    return to_one_hot(small_seg), seg
+
+
+def color_normalize(x, mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]):
+    for t, m, s in zip(x, mean, std):
+        t.sub_(m)
+        t.div_(s)
+    return x
 
 
 if __name__ == '__main__':
@@ -235,7 +258,6 @@ if __name__ == '__main__':
     parser.add_argument('--patch_size', default=16, type=int, help='Patch resolution of the model.')
     parser.add_argument("--checkpoint_key", default="teacher", type=str, help='Key to use in the checkpoint (example: "teacher")')
     parser.add_argument('--output_dir', default=".", help='Path where to save segmentations')
-    parser.add_argument("--input_size", type=int, nargs="+", default=[480], help="size of shorter image side")
     parser.add_argument('--data_path', default='/path/to/davis/', type=str)
     parser.add_argument("--n_last_frames", type=int, default=7, help="number of preceeding frames")
     parser.add_argument("--size_mask_neighborhood", default=12, type=int,
@@ -268,5 +290,5 @@ if __name__ == '__main__':
         video_dir = os.path.join(args.data_path, "JPEGImages/480p/", video_name)
         frame_list = read_frame_list(video_dir)
         seg_path = frame_list[0].replace("JPEGImages", "Annotations").replace("jpg", "png")
-        first_seg, seg_ori = read_seg(seg_path, args.input_size, args.patch_size)
+        first_seg, seg_ori = read_seg(seg_path, args.patch_size)
         eval_video_tracking_davis(args, model, frame_list, video_dir, first_seg, seg_ori, color_palette)
